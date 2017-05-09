@@ -110,7 +110,9 @@ void PReLULayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
   const int_tp count = bottom[0]->count();
   const int_tp dim = bottom[0]->count(2);
   const int_tp channels = bottom[0]->shape(1);
-
+  vector<int> offset_vector(bottom[0]->num_axes(),0);
+  offset_vector[0] =1;
+  int_tp row_stride = top[0]->offset(offset_vector);
   // For in-place computation
   if (top[0] == bottom[0]) {
     bottom_data = bottom_memory_.gpu_data();
@@ -130,7 +132,7 @@ void PReLULayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
       // NOLINT_NEXT_LINE(whitespace/operators)
       PReLUParamBackward<Dtype> CUDA_KERNEL(CAFFE_GET_BLOCKS(cdim),
         CAFFE_CUDA_NUM_THREADS)(
-        cdim, bottom[0]->shape(0), top[0]->offset(1), top_diff ,
+        cdim, bottom[0]->shape(0), row_stride, top_diff ,
         bottom_data ,
         backward_buff_.mutable_gpu_diff());
       CUDA_POST_KERNEL_CHECK;
@@ -177,7 +179,7 @@ void PReLULayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
       viennacl::ocl::kernel &oclk_prelu = program.get_kernel(
           CL_KERNEL_SELECT("prelu_param_backward"));
       viennacl::ocl::enqueue(
-          oclk_prelu(cdim, bottom[0]->shape(0), top[0]->offset(1),
+          oclk_prelu(cdim, bottom[0]->shape(0), row_stride,
                      WrapHandle((cl_mem)top_diff, &ctx),
               WrapHandle((cl_mem) bottom_data, &ctx),
               WrapHandle((cl_mem) (backward_buff_.mutable_gpu_diff()), &ctx)),
