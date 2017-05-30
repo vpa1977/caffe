@@ -91,7 +91,7 @@ if DEFINED APPVEYOR (
     :: If python is on your path leave this alone
     if NOT DEFINED PYTHON_EXE set PYTHON_EXE=python
     :: Run the tests
-    if NOT DEFINED RUN_TESTS set RUN_TESTS=1
+    if NOT DEFINED RUN_TESTS set RUN_TESTS=0
     :: Run lint
     if NOT DEFINED RUN_LINT set RUN_LINT=0
     :: Build the install target
@@ -112,7 +112,7 @@ if DEFINED APPVEYOR (
     :: Use Intel spatial kernels acceleration for forward convolution on Intel iGPUs
     if NOT DEFINED USE_INTEL_SPATIAL set USE_INTEL_SPATIAL=0
     :: Disable host/device shared memory
-    if NOT DEFINED DISABLE_DEVICE_HOST_UNIFIED_MEMORY=0
+    if NOT DEFINED DISABLE_DEVICE_HOST_UNIFIED_MEMORY set DISABLE_DEVICE_HOST_UNIFIED_MEMORY=0
 )
 
 :: Set the appropriate CMake generator
