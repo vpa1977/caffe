@@ -2767,12 +2767,12 @@ template void LibDNNConvSpatial<float>::swizzleWeights(
     const float *bottom,
     const float *top,
     int_tp swizzle_factor,
-    bool interleave = false);
+    bool interleave);
 template void LibDNNConvSpatial<double>::swizzleWeights(
     const double *bottom,
     const double *top,
     int_tp swizzle_factor,
-    bool interleave = false);
+    bool interleave);
 
 template<>
 void LibDNNConvSpatial<double>::create_convolution_kernel(
