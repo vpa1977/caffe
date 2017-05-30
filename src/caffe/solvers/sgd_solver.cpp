@@ -75,10 +75,15 @@ Dtype SGDSolver<Dtype>::GetLearningRate() {
       if (this->iter_ >= iter_next_update) {
         this->current_step_++;
         this->iter_last_event_ = this->iter_;
-        LOG(INFO) << "Plateau Status: Iteration " << this->iter_
-                  << ", step = " << this->current_step_;
       }
     }
+	
+	 if (this->param_.display() && this->iter_ % this->param_.display() == 0
+        && this->iter_last_event_ > (this->iter_ - this->param_.display())) {
+      LOG(INFO) << "Plateau Status: Iteration " << this->iter_
+                << ", current minimum_loss = " << this->minimum_loss_;
+    }
+
 
     rate = this->param_.base_lr() * pow(this->param_.gamma(), this->current_step_);
   } else {
