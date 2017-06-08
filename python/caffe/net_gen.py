@@ -91,6 +91,8 @@ class UNetConf:
     sknetconfs = []
     # Upsampling path with deconvolutions instead of convolutions
     use_deconv_uppath = False
+    # Use a more stable implementation of upconvolutions
+    use_stable_upconv = False
     
     def parse(self, params):
         if ('depth' in params):
@@ -111,6 +113,8 @@ class UNetConf:
             self.conv_up = params['act_up']
         if ('use_deconv_uppath' in params):
             self.use_deconv_uppath = params['use_deconv_uppath']
+        if ('use_stable_upconv' in params):
+            self.use_stable_upconv = params['use_stable_upconv']
         if ('sknetconfs' in params):
             for sknetconf_dict in params['sknetconfs']:
                 if (sknetconf_dict != None):
@@ -226,10 +230,22 @@ def convolution(bottom, num_output, kernel_size=[3], stride=[1], pad=[0], dilati
 def max_pool(netconf, bottom, kernel_size=[2], stride=[2], pad=[0], dilation=[1]):
     return L.Pooling(bottom, pool=P.Pooling.MAX, kernel_size=kernel_size, stride=stride, pad=pad, dilation=dilation)
     
-def upconv(netconf, bottom, num_output_conv, kernel_size=[2], stride=[2]):    
-    deconv = L.Deconvolution(bottom, convolution_param=dict(num_output=num_output_conv, kernel_size=kernel_size, stride=stride, pad=[0], group=1,
+def upconv(netconf, bottom, num_output_dec, num_output_conv, kernel_size=[2], stride=[2], stable_mode=False):
+    # Stable mode is the more numerically stable pathway
+    if stable_mode:
+        deconv = L.Deconvolution(bottom, convolution_param=dict(num_output=num_output_dec, kernel_size=kernel_size, stride=stride, pad=[0], group=num_output_dec,
+                                 weight_filler=dict(type='constant', value=1), bias_term=False),
+                                 param=dict(lr_mult=0, decay_mult=0))
+    
+        conv = L.Convolution(deconv, num_output=num_output_conv, kernel_size=[1], stride=[1], pad=[0], group=1,
+                             param=[dict(lr_mult=1),dict(lr_mult=2)],
+                             weight_filler=dict(type='msra'),
+                             bias_filler=dict(type='constant'))
+        return conv
+    else:
+        deconv = L.Deconvolution(bottom, convolution_param=dict(num_output=num_output_conv, kernel_size=kernel_size, stride=stride, pad=[0], group=1,
                                                             weight_filler=dict(type='msra'), bias_filler=dict(type='constant')),param=[dict(lr_mult=1),dict(lr_mult=2)])
-    return deconv
+        return deconv
     
 def mergecrop(bottom_a, bottom_b, op = 'stack'):
     return L.MergeCrop(bottom_a, bottom_b, forward=[1,1], backward=[1,1], operation=(0 if (op == 'stack') else 1))
@@ -331,8 +347,8 @@ def implement_usknet(bottom, netconf, unetconf, return_blobs_only=True):
     if unetconf.depth > 0:
         # U-Net upsampling; Upconvolution+MergeCrop+2*Convolution
         for i in range(0, unetconf.depth):
-            conv = upconv(netconf, blobs[-1], unetconf.fmap_dec_rule(fmaps[-1]), kernel_size=unetconf.downsampling_strategy[unetconf.depth - i - 1],
-                                       stride=unetconf.downsampling_strategy[unetconf.depth - i - 1])
+            conv = upconv(netconf, blobs[-1], fmaps[-1], unetconf.fmap_dec_rule(fmaps[-1]), kernel_size=unetconf.downsampling_strategy[unetconf.depth - i - 1],
+                                       stride=unetconf.downsampling_strategy[unetconf.depth - i - 1], stable_mode=unetconf.use_stable_upconv)
             blobs = blobs + [conv]
             fmaps = fmaps + [unetconf.fmap_dec_rule(fmaps[-1])]
             
@@ -366,7 +382,7 @@ def implement_usknet(bottom, netconf, unetconf, return_blobs_only=True):
     else:
         return blobs[-1], fmaps[-1]
     
-def fix_input_dims(net, source_layers, max_shapes=[], shape_coupled=[], phase=None, stage=None, verbose=False):
+def fix_input_dims(net, source_layers, max_shapes=[], min_shapes=[], shape_coupled=[], phase=None, stage=None, verbose=False):
     """
     This function takes as input:
     net - The network
@@ -399,11 +415,12 @@ def fix_input_dims(net, source_layers, max_shapes=[], shape_coupled=[], phase=No
     print("Source nodes: " + str(len(graph.get_source_nodes())))
     print("Sink nodes: " + str(len(graph.get_sink_nodes())))
 
-    sources = graph.get_source_nodes()
+    sources = graph.get_source_nodes()   
     sinks = graph.get_sink_nodes()
     
     test_sources = []
     test_max_shapes = []
+    test_min_shapes = []
     
     dims = 0
     
@@ -415,21 +432,46 @@ def fix_input_dims(net, source_layers, max_shapes=[], shape_coupled=[], phase=No
                 if (source.fn == source_layer):
                     test_sources = test_sources + [source]
                     test_max_shape = source.fn.params['dim']
+                    test_min_shape = source.fn.params['dim']
                     if (len(max_shapes) > i):
                         test_max_shape = test_max_shape + max_shapes[i]
+                    if (len(min_shapes) > i):
+                        test_min_shape = test_min_shape + min_shapes[i]
                     dims = max(dims, len(test_max_shape) - 2)
+                    while (len(test_min_shape) < len(test_max_shape)):
+                        test_min_shape.append(1)
                     test_max_shapes = test_max_shapes + [test_max_shape]
+                    test_min_shapes = test_min_shapes + [test_min_shape]
             elif('input_param' in source.fn.params):
                 if (source.fn == source_layer):
                     test_sources = test_sources + [source]
                     test_max_shape = source.fn.params['input_param']['shape']['dim']
+                    test_min_shape = source.fn.params['input_param']['shape']['dim']
                     if (len(max_shapes) > i):
                         test_max_shape = test_max_shape + max_shapes[i]
+                    if (len(min_shapes) > i):
+                        test_min_shape = test_min_shape + min_shapes[i]
                     dims = max(dims, len(test_max_shape) - 2)
+                    while (len(test_min_shape) < len(test_max_shape)):
+                        test_min_shape.append(1)
                     test_max_shapes = test_max_shapes + [test_max_shape]
-
+                    test_min_shapes = test_min_shapes + [test_min_shape]
+            elif('dummy_data_param' in source.fn.params):
+                if (source.fn == source_layer):
+                    test_sources = test_sources + [source]
+                    test_max_shape = source.fn.params['dummy_data_param']['shape']['dim']
+                    test_min_shape = source.fn.params['dummy_data_param']['shape']['dim']
+                    if (len(max_shapes) > i):
+                        test_max_shape = test_max_shape + max_shapes[i]
+                    if (len(min_shapes) > i):
+                        test_min_shape = test_min_shape + min_shapes[i]
+                    dims = max(dims, len(test_max_shape) - 2)
+                    while (len(test_min_shape) < len(test_max_shape)):
+                        test_min_shape.append(1)
+                    test_max_shapes = test_max_shapes + [test_max_shape]
+                    test_min_shapes = test_min_shapes + [test_min_shape]
     test_current_shapes = [[] for i in range(0,len(test_sources))]
-    
+                
     curr_src_idx = 0
     
     # Test each dimension
@@ -462,7 +504,7 @@ def fix_input_dims(net, source_layers, max_shapes=[], shape_coupled=[], phase=No
                     print test_current_shapes
                     print "Valid shape: " + str(not error)
                 
-                if (error and ((len(test_current_shapes[curr_src_idx]) - 2 <= dim_idx) or (test_current_shapes[curr_src_idx][2 + dim_idx] == 1))):
+                if (error and ((len(test_current_shapes[curr_src_idx]) - 2 <= dim_idx) or (test_current_shapes[curr_src_idx][2 + dim_idx] == test_min_shapes[curr_src_idx][2 + dim_idx]))):
                     # Reached minimum shape, reset source and go to previous source
                     if (len(test_current_shapes) - 2 > dim_idx):
                         test_current_shapes[curr_src_idx][2 + dim_idx] = test_max_shapes[curr_src_idx][2 + dim_idx]
@@ -472,7 +514,7 @@ def fix_input_dims(net, source_layers, max_shapes=[], shape_coupled=[], phase=No
                         # Unsuccessful return
                         return False
                 # Change the shape
-                if (error and test_current_shapes[curr_src_idx][2 + dim_idx] > 1):
+                if (error and test_current_shapes[curr_src_idx][2 + dim_idx] > test_min_shapes[curr_src_idx][2 + dim_idx]):
                     # Error, but still variants left to try, so decrease the dimension
                     test_current_shapes[curr_src_idx][2 + dim_idx] = test_current_shapes[curr_src_idx][2 + dim_idx] - 1
                 
@@ -486,11 +528,13 @@ def fix_input_dims(net, source_layers, max_shapes=[], shape_coupled=[], phase=No
                                     
     # Set the shapes
     for src_idx in range(0, len(test_sources)):
-        if ('dim' in source.fn.params):
+        if ('dim' in test_sources[src_idx].fn.params):
             test_sources[src_idx].fn.params['dim'] = test_current_shapes[src_idx]
-        elif('input_param' in source.fn.params):
+        elif('input_param' in test_sources[src_idx].fn.params):
             test_sources[src_idx].fn.params['input_param']['shape']['dim'] = test_current_shapes[src_idx]
-
+        elif('dummy_data_param' in test_sources[src_idx].fn.params):
+            test_sources[src_idx].fn.params['dummy_data_param']['shape']['dim'] = test_current_shapes[src_idx]
+            
     # Successful return
     return True
         
@@ -795,7 +839,28 @@ class Node:
             if (len(shape) > 0):
                 for out_edge in self.out_edges:
                     out_edge.set_shape(index, shape)
-                    
+        
+        elif (self.fn.type_name == 'Crop'):
+            shape = []
+                        
+            shape_A = self.in_edges[0].get_shape(index)
+            shape_B = self.in_edges[1].get_shape(index)
+                       
+            shape = copy.deepcopy(shape_B)
+                        
+            if (len(shape_A) > 0 and len(shape_B) > 0):
+                for i in range(2,len(shape_A)):
+                    if (shape_A[i] > shape_B[i]):
+                        self.error = True
+                        
+            if len(shape) >= 2 and len(shape_A) >= 2:
+                shape[0] = shape_A[0]
+                shape[1] = shape_A[1]
+
+            if (len(shape) > 0):
+                for out_edge in self.out_edges:
+                    out_edge.set_shape(index, shape)
+            
         elif (self.fn.type_name == 'InnerProduct'):
             num_output = self.fn.params['inner_product_param']['num_output'] if ('inner_product_param' in self.fn.params and 'num_output' in self.fn.params['inner_product_param']) else 1
 
