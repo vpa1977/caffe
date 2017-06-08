@@ -9,8 +9,227 @@
 
 #include "caffe/fast_rcnn_layers.hpp"
 
-namespace caffe {
+#ifdef USE_GREENTEA
+#include "caffe/greentea/greentea.hpp"
+#include "caffe/greentea/greentea_math_functions.hpp"
+#endif
 
+namespace caffe {
+#ifdef USE_GREENTEA
+	const char* const roi_pooling_kernel_forward =
+		"\n"
+		"#define Dtype float\n"
+		"\n"
+		"__kernel void ROIPoolForward(const int nthreads, __global const Dtype* bottom_data,\n"
+		"    const Dtype spatial_scale, const int channels, const int height,\n"
+		"    const int width, const int pooled_height, const int pooled_width,\n"
+		"    __global const Dtype* bottom_rois, __global Dtype* top_data, __global int* argmax_data) \n"
+		"{\n"
+		"			\n"
+		"	for (int index = get_global_id(0); index < nthreads; index += get_global_size(0)) {\n"
+		"    // (n, c, ph, pw) is an element in the pooled output\n"
+		"    int pw = index % pooled_width;\n"
+		"    int ph = (index / pooled_width) % pooled_height;\n"
+		"    int c = (index / pooled_width / pooled_height) % channels;\n"
+		"    int n = index / pooled_width / pooled_height / channels;\n"
+		"\n"
+		"    bottom_rois += n * 5;\n"
+		"    int roi_batch_ind = bottom_rois[0];\n"
+		"    int roi_start_w = round(bottom_rois[1] * spatial_scale);\n"
+		"    int roi_start_h = round(bottom_rois[2] * spatial_scale);\n"
+		"    int roi_end_w = round(bottom_rois[3] * spatial_scale);\n"
+		"    int roi_end_h = round(bottom_rois[4] * spatial_scale);\n"
+		"\n"
+		"    // Force malformed ROIs to be 1x1\n"
+		"    int roi_width = max(roi_end_w - roi_start_w + 1, 1);\n"
+		"    int roi_height = max(roi_end_h - roi_start_h + 1, 1);\n"
+		"    Dtype bin_size_h = (Dtype)(roi_height)\n"
+		"                       / (Dtype)(pooled_height);\n"
+		"    Dtype bin_size_w = (Dtype)(roi_width)\n"
+		"                       / (Dtype)(pooled_width);\n"
+		"\n"
+		"    int hstart = (int)(floor((Dtype)(ph)\n"
+		"                                        * bin_size_h));\n"
+		"    int wstart = (int)(floor((Dtype)(pw)\n"
+		"                                        * bin_size_w));\n"
+		"    int hend = (int)(ceil((Dtype)(ph + 1)\n"
+		"                                     * bin_size_h));\n"
+		"    int wend = (int)(ceil((Dtype)(pw + 1)\n"
+		"                                     * bin_size_w));\n"
+		"\n"
+		"    // Add roi offsets and clip to input boundaries\n"
+		"    hstart = min(max(hstart + roi_start_h, 0), height);\n"
+		"    hend = min(max(hend + roi_start_h, 0), height);\n"
+		"    wstart = min(max(wstart + roi_start_w, 0), width);\n"
+		"    wend = min(max(wend + roi_start_w, 0), width);\n"
+		"    bool is_empty = (hend <= hstart) || (wend <= wstart);\n"
+		"\n"
+		"    // Define an empty pooling region to be zero\n"
+		"    Dtype maxval = is_empty ? 0 : -FLT_MAX;\n"
+		"    // If nothing is pooled, argmax = -1 causes nothing to be backprop'd\n"
+		"    int maxidx = -1;\n"
+		"    bottom_data += (roi_batch_ind * channels + c) * height * width;\n"
+		"    for (int h = hstart; h < hend; ++h) {\n"
+		"      for (int w = wstart; w < wend; ++w) {\n"
+		"        int bottom_index = h * width + w;\n"
+		"        if (bottom_data[bottom_index] > maxval) {\n"
+		"          maxval = bottom_data[bottom_index];\n"
+		"          maxidx = bottom_index;\n"
+		"        }\n"
+		"      }\n"
+		"    }\n"
+		"    top_data[index] = maxval;\n"
+		"    argmax_data[index] = maxidx;\n"
+		"  }\n"
+		"}\n"
+		"\n"
+		"\n";
+	const char* const roi_pooling_kernel_backwards =
+		"\n"
+		"#define Dtype float\n"
+		"\n"
+"__kernel void ROIPoolBackward(const int nthreads,__global const Dtype* top_diff,\n"
+"    __global const int* argmax_data, const int num_rois, const Dtype spatial_scale,\n"
+"    const int channels, const int height, const int width,\n"
+"    const int pooled_height, const int pooled_width, __global Dtype* bottom_diff,\n"
+"    __global const Dtype* bottom_rois) \n"
+"{\n"
+"  for (int index = get_global_id(0); index < nthreads; index += get_global_size(0)) {\n"
+"    // (n, c, h, w) coords in bottom data\n"
+"    int w = index % width;\n"
+"    int h = (index / width) % height;\n"
+"    int c = (index / width / height) % channels;\n"
+"    int n = index / width / height / channels;\n"
+"\n"
+"    Dtype gradient = 0;\n"
+"    // Accumulate gradient over all ROIs that pooled this element\n"
+"    for (int roi_n = 0; roi_n < num_rois; ++roi_n) {\n"
+"      __global const Dtype* offset_bottom_rois = bottom_rois + roi_n * 5;\n"
+"      int roi_batch_ind = offset_bottom_rois[0];\n"
+"      // Skip if ROI's batch index doesn't match n\n"
+"      if (n != roi_batch_ind) {\n"
+"        continue;\n"
+"      }\n"
+"\n"
+"      int roi_start_w = round(offset_bottom_rois[1] * spatial_scale);\n"
+"      int roi_start_h = round(offset_bottom_rois[2] * spatial_scale);\n"
+"      int roi_end_w = round(offset_bottom_rois[3] * spatial_scale);\n"
+"      int roi_end_h = round(offset_bottom_rois[4] * spatial_scale);\n"
+"\n"
+"      // Skip if ROI doesn't include (h, w)\n"
+"      const bool in_roi = (w >= roi_start_w && w <= roi_end_w &&\n"
+"                           h >= roi_start_h && h <= roi_end_h);\n"
+"      if (!in_roi) {\n"
+"        continue;\n"
+"      }\n"
+"\n"
+"      int offset = (roi_n * channels + c) * pooled_height * pooled_width;\n"
+"      __global const Dtype* offset_top_diff = top_diff + offset;\n"
+"      __global const int* offset_argmax_data = argmax_data + offset;\n"
+"\n"
+"      // Compute feasible set of pooled units that could have pooled\n"
+"      // this bottom unit\n"
+"\n"
+"      // Force malformed ROIs to be 1x1\n"
+"      int roi_width = max(roi_end_w - roi_start_w + 1, 1);\n"
+"      int roi_height = max(roi_end_h - roi_start_h + 1, 1);\n"
+"\n"
+"      Dtype bin_size_h = (Dtype)(roi_height)\n"
+"                         / (Dtype)(pooled_height);\n"
+"      Dtype bin_size_w = (Dtype)(roi_width)\n"
+"                         / (Dtype)(pooled_width);\n"
+"\n"
+"      int phstart = floor((Dtype)(h - roi_start_h) / bin_size_h);\n"
+"      int phend = ceil((Dtype)(h - roi_start_h + 1) / bin_size_h);\n"
+"      int pwstart = floor((Dtype)(w - roi_start_w) / bin_size_w);\n"
+"      int pwend = ceil((Dtype)(w - roi_start_w + 1) / bin_size_w);\n"
+"\n"
+"      phstart = min(max(phstart, 0), pooled_height);\n"
+"      phend = min(max(phend, 0), pooled_height);\n"
+"      pwstart = min(max(pwstart, 0), pooled_width);\n"
+"      pwend = min(max(pwend, 0), pooled_width);\n"
+"\n"
+"      for (int ph = phstart; ph < phend; ++ph) {\n"
+"        for (int pw = pwstart; pw < pwend; ++pw) {\n"
+"          if (offset_argmax_data[ph * pooled_width + pw] == (h * width + w)) {\n"
+"            gradient += offset_top_diff[ph * pooled_width + pw];\n"
+"          }\n"
+"        }\n"
+"      }\n"
+"    }\n"
+"    bottom_diff[index] = gradient;\n"
+"  }\n"
+"}\n"
+"\n";
+
+template <typename Dtype>
+void ROIPoolingLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
+	const vector<Blob<Dtype>*>& top) {
+	viennacl::ocl::context &ctx = viennacl::ocl::get_context(
+		this->device_->id());
+	static bool compiled = false;
+	if (!compiled)
+	{
+		ctx.add_program(roi_pooling_kernel_forward, "ROIPoolForward");
+		compiled = true;
+	}
+	static viennacl::ocl::program &program = ctx.get_program("ROIPoolForward");
+	static viennacl::ocl::kernel& forward_pool = program.get_kernel("ROIPoolForward");
+	forward_pool.global_work_size(256 * 64);
+
+	viennacl::ocl::handle<cl_mem> bottom_data = WrapHandle((cl_mem)bottom[0]->gpu_data(), &ctx);
+	viennacl::ocl::handle<cl_mem> bottom_rois = WrapHandle((cl_mem)bottom[1]->gpu_data(), &ctx);
+	viennacl::ocl::handle<cl_mem> top_data = WrapHandle((cl_mem)top[0]->mutable_gpu_data(), &ctx);
+	viennacl::ocl::handle<cl_mem> argmax_data = WrapHandle((cl_mem)max_idx_.mutable_gpu_data(), &ctx);
+	int count = top[0]->count();
+	// NOLINT_NEXT_LINE(whitespace/operators)
+	viennacl::ocl::enqueue(
+		forward_pool(
+			count, bottom_data, spatial_scale_, channels_, height_, width_,
+			pooled_height_, pooled_width_, bottom_rois, top_data, argmax_data
+		),
+		ctx.get_queue()
+	);
+}
+
+template <typename Dtype>
+void ROIPoolingLayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
+	const vector<bool>& propagate_down, const vector<Blob<Dtype>*>& bottom) {
+	if (!propagate_down[0]) {
+		return;
+	}
+	viennacl::ocl::context &ctx = viennacl::ocl::get_context(
+		this->device_->id());
+	static bool compiled = false;
+	if (!compiled)
+	{
+		ctx.add_program(roi_pooling_kernel_forward, "ROIPoolBackward");
+		compiled = true;
+	}
+	static viennacl::ocl::program &program = ctx.get_program("ROIPoolBackward");
+	static viennacl::ocl::kernel& forward_pool = program.get_kernel("ROIPoolBackward");
+	forward_pool.global_work_size(256 * 64);
+
+
+
+	viennacl::ocl::handle<cl_mem>  bottom_rois = WrapHandle((cl_mem)bottom[1]->gpu_data(), &ctx);
+	viennacl::ocl::handle<cl_mem> top_diff = WrapHandle((cl_mem)top[0]->gpu_diff(), &ctx);
+	const int count = bottom[0]->count();
+	greentea_gpu_set(this->device_->id(), count, Dtype(0.), (cl_mem)bottom[0]->mutable_gpu_diff(),0);
+	viennacl::ocl::handle<cl_mem>  bottom_diff = WrapHandle((cl_mem)bottom[0]->mutable_gpu_diff(), &ctx);
+	viennacl::ocl::handle<cl_mem> argmax_data = WrapHandle((cl_mem)max_idx_.gpu_data(), &ctx);
+	// NOLINT_NEXT_LINE(whitespace/operators)
+	viennacl::ocl::enqueue(
+		forward_pool(
+			count, top_diff, argmax_data, top[0]->num(), spatial_scale_, channels_,
+			height_, width_, pooled_height_, pooled_width_, bottom_diff, bottom_rois),
+		ctx.get_queue());
+
+}
+
+
+#endif
+#ifdef USE_CUDA
 template <typename Dtype>
 __global__ void ROIPoolForward(const int nthreads, const Dtype* bottom_data,
     const Dtype spatial_scale, const int channels, const int height,
@@ -179,7 +398,7 @@ void ROIPoolingLayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
       height_, width_, pooled_height_, pooled_width_, bottom_diff, bottom_rois);
   CUDA_POST_KERNEL_CHECK;
 }
-
+#endif
 INSTANTIATE_LAYER_GPU_FUNCS(ROIPoolingLayer);
 
 }  // namespace caffe

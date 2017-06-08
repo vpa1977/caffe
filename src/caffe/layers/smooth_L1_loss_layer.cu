@@ -7,8 +7,152 @@
 
 #include "caffe/fast_rcnn_layers.hpp"
 
-namespace caffe {
+#ifdef USE_GREENTEA
+#include "caffe/greentea/greentea.hpp"
+#include "caffe/greentea/greentea_math_functions.hpp"
+#endif
 
+namespace caffe {
+#ifdef USE_GREENTEA
+	const char* const forward_layer =
+		"\n"
+		"#define Dtype float\n"
+		"\n"
+		"__kernel void SmoothL1Forward(const int n, __global const Dtype* in, __global Dtype* out,  Dtype sigma2) {\n"
+		"  // f(x) = 0.5 * (sigma * x)^2          if |x| < 1 / sigma / sigma\n"
+		"  //        |x| - 0.5 / sigma / sigma    otherwise\n"
+		"  for (int index = get_global_id(0); index < n; index += get_global_id(0)) {\n"
+		"    Dtype val = in[index];\n"
+		"    Dtype abs_val = fabs(val);\n"
+		"    if (abs_val < 1.0 / sigma2) {\n"
+		"      out[index] = 0.5 * val * val * sigma2;\n"
+		"    } else {\n"
+		"      out[index] = abs_val - 0.5 / sigma2;\n"
+		"    }\n"
+		"  }\n"
+		"}\n"
+		"\n";
+const char* const backwards_layer=
+		"#define Dtype float\n"
+		"\n"
+		"__kernel void SmoothL1Backward(const int n, __global const Dtype* in, __global Dtype* out,\n"
+		"    Dtype sigma2) {\n"
+		"  // f'(x) = sigma * sigma * x         if |x| < 1 / sigma / sigma\n"
+		"  //       = sign(x)                   otherwise\n"
+		"  for (int index = get_global_id(0); index < n; index += get_global_id(0)) {\n"
+		"    Dtype val = in[index];\n"
+		"    Dtype abs_val = fabs(val);\n"
+		"    if (abs_val < 1.0 / sigma2) {\n"
+		"      out[index] = sigma2 * val;\n"
+		"    } else {\n"
+		"      out[index] = ((Dtype)(0) < val) - (val < (Dtype)(0));\n"
+		"    }\n"
+		"  }\n"
+		"}\n"
+		"\n"
+		"\n";
+
+
+template <typename Dtype>
+void SmoothL1LossLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
+	const vector<Blob<Dtype>*>& top) {
+
+	viennacl::ocl::context &ctx = viennacl::ocl::get_context(
+		this->device_->id());
+	static bool compiled = false;
+	if (!compiled)
+	{
+		ctx.add_program(forward_layer, "SmoothL1Forward");
+		compiled = true;
+	}
+	static viennacl::ocl::program &program = ctx.get_program("SmoothL1Forward");
+	static viennacl::ocl::kernel& forward_pool = program.get_kernel("SmoothL1Forward");
+	forward_pool.global_work_size(256 * 64);
+
+	int count = bottom[0]->count();
+	greentea_gpu_sub<Dtype>(this->device_->id(),
+		count,
+		(const cl_mem)bottom[0]->gpu_data(),0,
+		(const cl_mem)bottom[1]->gpu_data(),0,
+		(cl_mem)diff_.mutable_gpu_data(),0);    // d := b0 - b1
+	if (has_weights_) {
+		// apply "inside" weights
+		greentea_gpu_mul<Dtype>(this->device_->id(),
+			count,
+			(const cl_mem)bottom[2]->gpu_data(),0,
+			(const cl_mem)diff_.gpu_data(),0,
+			(cl_mem)diff_.mutable_gpu_data(),0);  // d := w_in * (b0 - b1)
+	}
+	viennacl::ocl::enqueue(forward_pool(
+		count, WrapHandle((cl_mem)diff_.gpu_data(), &ctx), WrapHandle((cl_mem)errors_.mutable_gpu_data(), &ctx), sigma2_),
+		ctx.get_queue());
+
+	if (has_weights_) {
+		// apply "outside" weights
+		greentea_gpu_mul<Dtype>(this->device_->id(),
+			count,
+			(cl_mem)bottom[3]->gpu_data(),0,
+			(cl_mem)errors_.gpu_data(), 0,
+			(cl_mem)errors_.mutable_gpu_data(),0);  // d := w_out * SmoothL1(w_in * (b0 - b1))
+	}
+
+	Dtype loss;
+	greentea_gpu_dot<Dtype>(this->device_->id(), count, (cl_mem)ones_.gpu_data(),0,(cl_mem) errors_.gpu_data(),0, &loss);
+	top[0]->mutable_cpu_data()[0] = loss / bottom[0]->num();
+}
+
+
+template <typename Dtype>
+void SmoothL1LossLayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
+	const vector<bool>& propagate_down, const vector<Blob<Dtype>*>& bottom) {
+	// after forwards, diff_ holds w_in * (b0 - b1)
+	viennacl::ocl::context &ctx = viennacl::ocl::get_context(this->device_->id());
+	static bool compiled = false;
+	if (!compiled)
+	{
+		ctx.add_program(backwards_layer, "SmoothL1Backward");
+		compiled = true;
+	}
+	static viennacl::ocl::program &program = ctx.get_program("SmoothL1Backward");
+	static viennacl::ocl::kernel& back_pool = program.get_kernel("SmoothL1Backward");
+	back_pool.global_work_size(256 * 64);
+
+	int count = diff_.count();
+	viennacl::ocl::enqueue(
+		back_pool(
+			count, WrapHandle((cl_mem)diff_.gpu_data(), &ctx), WrapHandle((cl_mem)diff_.mutable_gpu_data(), &ctx), sigma2_
+		), ctx.get_queue());
+	for (int i = 0; i < 2; ++i) {
+		if (propagate_down[i]) {
+			const Dtype sign = (i == 0) ? 1 : -1;
+			const Dtype alpha = sign * top[0]->cpu_diff()[0] / bottom[i]->num();
+			greentea_gpu_axpby<Dtype>(this->device_->id(),
+				count,                           // count
+				alpha,                           // alpha
+				(const cl_mem)diff_.gpu_data(),0,                // x
+				Dtype(0),                        // beta
+				(cl_mem)bottom[i]->mutable_gpu_diff(),0);  // y
+			if (has_weights_) {
+				// Scale by "inside" weight
+				greentea_gpu_mul<Dtype>(this->device_->id(),
+					count,
+					(const cl_mem)bottom[2]->gpu_data(),0,
+					(const cl_mem)bottom[i]->gpu_diff(),0,
+					(cl_mem)bottom[i]->mutable_gpu_diff(),0);
+				// Scale by "outside" weight
+				greentea_gpu_mul<Dtype>(this->device_->id(),
+					count,
+					(const cl_mem)bottom[3]->gpu_data(),0,
+					(const cl_mem)bottom[i]->gpu_diff(),0,
+					(cl_mem)bottom[i]->mutable_gpu_diff(),0);
+			}
+		}
+	}
+}
+
+#endif
+
+#ifdef USE_CUDA
 template <typename Dtype>
 __global__ void SmoothL1Forward(const int n, const Dtype* in, Dtype* out,
     Dtype sigma2) {
@@ -111,6 +255,7 @@ void SmoothL1LossLayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
     }
   }
 }
+#endif
 
 INSTANTIATE_LAYER_GPU_FUNCS(SmoothL1LossLayer);
 
