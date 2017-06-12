@@ -16,7 +16,6 @@ namespace caffe {
 #ifdef USE_GREENTEA
 	const char* const forward_layer =
 		"\n"
-		"#define Dtype float\n"
 		"\n"
 		"__kernel void SmoothL1Forward(const int n, __global const Dtype* in, __global Dtype* out,  Dtype sigma2) {\n"
 		"  // f(x) = 0.5 * (sigma * x)^2          if |x| < 1 / sigma / sigma\n"
@@ -33,7 +32,6 @@ namespace caffe {
 		"}\n"
 		"\n";
 const char* const backwards_layer=
-		"#define Dtype float\n"
 		"\n"
 		"__kernel void SmoothL1Backward(const int n, __global const Dtype* in, __global Dtype* out,\n"
 		"    Dtype sigma2) {\n"
@@ -62,10 +60,16 @@ void SmoothL1LossLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
 	static bool compiled = false;
 	if (!compiled)
 	{
-		ctx.add_program(forward_layer, "SmoothL1Forward");
+		std::string kernel;
+		if (is_same<Dtype, float>::value)
+			kernel = "#define DType float\n";
+		else if (is_same<Dtype, double>::value)
+			kernel = "#define DType double\n";
+		kernel += forward_layer;
+		ctx.add_program(kernel.c_str(), CL_KERNEL_SELECT("SmoothL1Forward"));
 		compiled = true;
 	}
-	static viennacl::ocl::program &program = ctx.get_program("SmoothL1Forward");
+	static viennacl::ocl::program &program = ctx.get_program(CL_KERNEL_SELECT("SmoothL1Forward"));
 	static viennacl::ocl::kernel& forward_pool = program.get_kernel("SmoothL1Forward");
 	forward_pool.global_work_size(256 * 64);
 
@@ -110,10 +114,16 @@ void SmoothL1LossLayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
 	static bool compiled = false;
 	if (!compiled)
 	{
-		ctx.add_program(backwards_layer, "SmoothL1Backward");
+		std::string kernel;
+		if (is_same<Dtype, float>::value)
+			kernel = "#define DType float\n";
+		else if (is_same<Dtype, double>::value)
+			kernel = "#define DType double\n";
+		kernel += backwards_layer;
+		ctx.add_program(kernel.c_str(), CL_KERNEL_SELECT("SmoothL1Backward"));
 		compiled = true;
 	}
-	static viennacl::ocl::program &program = ctx.get_program("SmoothL1Backward");
+	static viennacl::ocl::program &program = ctx.get_program(CL_KERNEL_SELECT("SmoothL1Backward"));
 	static viennacl::ocl::kernel& back_pool = program.get_kernel("SmoothL1Backward");
 	back_pool.global_work_size(256 * 64);
 

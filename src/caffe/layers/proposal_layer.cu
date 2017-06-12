@@ -221,10 +221,16 @@ void ProposalLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
 	static bool compiled = false;
 	if (!compiled)
 	{
-		ctx.add_program(proposal_kernel, "proposal");
+		std::string kernel;
+		if (is_same<Dtype, float>::value)
+			kernel = "#define DType float\n";
+		else if (is_same<Dtype, double>::value)
+			kernel = "#define DType double\n";
+		kernel += proposal_kernel;
+		ctx.add_program(kernel.c_str(), CL_KERNEL_SELECT("proposal"));
 		compiled = true;
 	}
-	static viennacl::ocl::program &program = ctx.get_program("proposal");
+	static viennacl::ocl::program &program = ctx.get_program(CL_KERNEL_SELECT("proposal"));
 	static viennacl::ocl::kernel &enumerate_kernel = program.get_kernel("enumerate_proposals_gpu");
 	static viennacl::ocl::kernel &retrieve_rois_kernel = program.get_kernel("retrieve_rois_gpu");
 	enumerate_kernel.global_work_size(256 * 64);

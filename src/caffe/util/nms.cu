@@ -13,7 +13,6 @@ namespace caffe {
 static const int nms_block_size = 64;
 const char* const nms_kernel = 
 		"\n"
-		"#define Dtype float\n"
 		"#define nms_block_size 64\n"
 		"\n"
 		"\n"
@@ -167,10 +166,16 @@ void nms_gpu(
 		static bool compiled = false;
 		if (!compiled)
 		{
-			ctx.add_program(nms_kernel, "nms");
+			std::string kernel;
+			if (is_same<Dtype, float>::value)
+				kernel = "#define DType float\n";
+			else if (is_same<Dtype, double>::value)
+				kernel = "#define DType double\n";
+			kernel += nms_kernel;
+			ctx.add_program(kernel.c_str(), CL_KERNEL_SELECT("nms"));
 			compiled = true;
 		}
-		viennacl::ocl::program &program = ctx.get_program("nms");
+		viennacl::ocl::program &program = ctx.get_program(CL_KERNEL_SELECT("nms"));
 		viennacl::ocl::kernel &nms = program.get_kernel("nms_mask");
 		nms.global_work_size(0, num_blocks * nms_block_size);
 		nms.local_work_size(0, nms_block_size);

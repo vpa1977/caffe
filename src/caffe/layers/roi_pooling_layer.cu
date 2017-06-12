@@ -18,7 +18,6 @@ namespace caffe {
 #ifdef USE_GREENTEA
 	const char* const roi_pooling_kernel_forward =
 		"\n"
-		"#define Dtype float\n"
 		"\n"
 		"__kernel void ROIPoolForward(const int nthreads, __global const Dtype* bottom_data,\n"
 		"    const Dtype spatial_scale, const int channels, const int height,\n"
@@ -86,7 +85,6 @@ namespace caffe {
 		"\n";
 	const char* const roi_pooling_kernel_backwards =
 		"\n"
-		"#define Dtype float\n"
 		"\n"
 "__kernel void ROIPoolBackward(const int nthreads,__global const Dtype* top_diff,\n"
 "    __global const int* argmax_data, const int num_rois, const Dtype spatial_scale,\n"
@@ -170,10 +168,16 @@ void ROIPoolingLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
 	static bool compiled = false;
 	if (!compiled)
 	{
-		ctx.add_program(roi_pooling_kernel_forward, "ROIPoolForward");
+		std::string kernel;
+		if (is_same<Dtype, float>::value)
+			kernel = "#define DType float\n";
+		else if (is_same<Dtype, double>::value)
+			kernel = "#define DType double\n";
+		kernel += roi_pooling_kernel_forward;
+		ctx.add_program(kernel.c_str(), CL_KERNEL_SELECT("ROIPoolForward"));
 		compiled = true;
 	}
-	static viennacl::ocl::program &program = ctx.get_program("ROIPoolForward");
+	static viennacl::ocl::program &program = ctx.get_program(CL_KERNEL_SELECT("ROIPoolForward"));
 	static viennacl::ocl::kernel& forward_pool = program.get_kernel("ROIPoolForward");
 	forward_pool.global_work_size(256 * 64);
 
@@ -203,10 +207,16 @@ void ROIPoolingLayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
 	static bool compiled = false;
 	if (!compiled)
 	{
-		ctx.add_program(roi_pooling_kernel_forward, "ROIPoolBackward");
+		std::string kernel;
+		if (is_same<Dtype, float>::value)
+			kernel = "#define DType float\n";
+		else if (is_same<Dtype, double>::value)
+			kernel = "#define DType double\n";
+		kernel += roi_pooling_kernel_backwards;
+		ctx.add_program(kernel.c_str(), CL_KERNEL_SELECT("ROIPoolBackward"));
 		compiled = true;
 	}
-	static viennacl::ocl::program &program = ctx.get_program("ROIPoolBackward");
+	static viennacl::ocl::program &program = ctx.get_program(CL_KERNEL_SELECT("ROIPoolBackward"));
 	static viennacl::ocl::kernel& forward_pool = program.get_kernel("ROIPoolBackward");
 	forward_pool.global_work_size(256 * 64);
 
