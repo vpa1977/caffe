@@ -168,9 +168,9 @@ void nms_gpu(
 		{
 			std::string kernel;
 			if (is_same<Dtype, float>::value)
-				kernel = "#define DType float\n";
+				kernel = "#define Dtype float\n";
 			else if (is_same<Dtype, double>::value)
-				kernel = "#define DType double\n";
+				kernel = "#define Dtype double\n";
 			kernel += nms_kernel;
 			ctx.add_program(kernel.c_str(), CL_KERNEL_SELECT("nms"));
 			compiled = true;

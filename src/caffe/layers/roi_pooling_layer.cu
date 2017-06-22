@@ -170,9 +170,9 @@ void ROIPoolingLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
 	{
 		std::string kernel;
 		if (is_same<Dtype, float>::value)
-			kernel = "#define DType float\n";
+			kernel = "#define Dtype float\n";
 		else if (is_same<Dtype, double>::value)
-			kernel = "#define DType double\n";
+			kernel = "#define Dtype double\n";
 		kernel += roi_pooling_kernel_forward;
 		ctx.add_program(kernel.c_str(), CL_KERNEL_SELECT("ROIPoolForward"));
 		compiled = true;
@@ -209,9 +209,9 @@ void ROIPoolingLayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
 	{
 		std::string kernel;
 		if (is_same<Dtype, float>::value)
-			kernel = "#define DType float\n";
+			kernel = "#define Dtype float\n";
 		else if (is_same<Dtype, double>::value)
-			kernel = "#define DType double\n";
+			kernel = "#define Dtype double\n";
 		kernel += roi_pooling_kernel_backwards;
 		ctx.add_program(kernel.c_str(), CL_KERNEL_SELECT("ROIPoolBackward"));
 		compiled = true;

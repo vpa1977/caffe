@@ -20,7 +20,7 @@ namespace caffe {
 		"__kernel void SmoothL1Forward(const int n, __global const Dtype* in, __global Dtype* out,  Dtype sigma2) {\n"
 		"  // f(x) = 0.5 * (sigma * x)^2          if |x| < 1 / sigma / sigma\n"
 		"  //        |x| - 0.5 / sigma / sigma    otherwise\n"
-		"  for (int index = get_global_id(0); index < n; index += get_global_id(0)) {\n"
+		"  for (int index = get_global_id(0); index < n; index += get_global_size(0)) {\n"
 		"    Dtype val = in[index];\n"
 		"    Dtype abs_val = fabs(val);\n"
 		"    if (abs_val < 1.0 / sigma2) {\n"
@@ -37,7 +37,7 @@ const char* const backwards_layer=
 		"    Dtype sigma2) {\n"
 		"  // f'(x) = sigma * sigma * x         if |x| < 1 / sigma / sigma\n"
 		"  //       = sign(x)                   otherwise\n"
-		"  for (int index = get_global_id(0); index < n; index += get_global_id(0)) {\n"
+		"  for (int index = get_global_id(0); index < n; index += get_global_size(0)) {\n"
 		"    Dtype val = in[index];\n"
 		"    Dtype abs_val = fabs(val);\n"
 		"    if (abs_val < 1.0 / sigma2) {\n"
@@ -62,16 +62,16 @@ void SmoothL1LossLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
 	{
 		std::string kernel;
 		if (is_same<Dtype, float>::value)
-			kernel = "#define DType float\n";
+			kernel = "#define Dtype float\n";
 		else if (is_same<Dtype, double>::value)
-			kernel = "#define DType double\n";
+			kernel = "#define Dtype double\n";
 		kernel += forward_layer;
 		ctx.add_program(kernel.c_str(), CL_KERNEL_SELECT("SmoothL1Forward"));
 		compiled = true;
 	}
 	static viennacl::ocl::program &program = ctx.get_program(CL_KERNEL_SELECT("SmoothL1Forward"));
 	static viennacl::ocl::kernel& forward_pool = program.get_kernel("SmoothL1Forward");
-	forward_pool.global_work_size(256 * 64);
+	forward_pool.global_work_size(0,256 * 64);
 
 	int count = bottom[0]->count();
 	greentea_gpu_sub<Dtype>(this->device_->id(),
@@ -87,8 +87,11 @@ void SmoothL1LossLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
 			(const cl_mem)diff_.gpu_data(),0,
 			(cl_mem)diff_.mutable_gpu_data(),0);  // d := w_in * (b0 - b1)
 	}
+
 	viennacl::ocl::enqueue(forward_pool(
-		count, WrapHandle((cl_mem)diff_.gpu_data(), &ctx), WrapHandle((cl_mem)errors_.mutable_gpu_data(), &ctx), sigma2_),
+		count, WrapHandle((cl_mem)diff_.gpu_data(), &ctx), 
+		WrapHandle((cl_mem)errors_.mutable_gpu_data(), &ctx), 
+		sigma2_),
 		ctx.get_queue());
 
 	if (has_weights_) {
@@ -99,10 +102,11 @@ void SmoothL1LossLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
 			(cl_mem)errors_.gpu_data(), 0,
 			(cl_mem)errors_.mutable_gpu_data(),0);  // d := w_out * SmoothL1(w_in * (b0 - b1))
 	}
-
-	Dtype loss;
-	greentea_gpu_dot<Dtype>(this->device_->id(), count, (cl_mem)ones_.gpu_data(),0,(cl_mem) errors_.gpu_data(),0, &loss);
-	top[0]->mutable_cpu_data()[0] = loss / bottom[0]->num();
+	
+	viennacl::vector<Dtype> to_sum((cl_mem)errors_.mutable_gpu_data(), count);
+	viennacl::scalar<Dtype> loss(0,ctx);
+	viennacl::linalg::sum_impl(to_sum, loss);
+	top[0]->mutable_cpu_data()[0] = loss.operator Dtype() / bottom[0]->num();
 }
 
 
@@ -116,21 +120,24 @@ void SmoothL1LossLayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
 	{
 		std::string kernel;
 		if (is_same<Dtype, float>::value)
-			kernel = "#define DType float\n";
+			kernel = "#define Dtype float\n";
 		else if (is_same<Dtype, double>::value)
-			kernel = "#define DType double\n";
+			kernel = "#define Dtype double\n";
 		kernel += backwards_layer;
 		ctx.add_program(kernel.c_str(), CL_KERNEL_SELECT("SmoothL1Backward"));
 		compiled = true;
 	}
 	static viennacl::ocl::program &program = ctx.get_program(CL_KERNEL_SELECT("SmoothL1Backward"));
 	static viennacl::ocl::kernel& back_pool = program.get_kernel("SmoothL1Backward");
-	back_pool.global_work_size(256 * 64);
+	back_pool.global_work_size(0, 256 * 64);
 
 	int count = diff_.count();
 	viennacl::ocl::enqueue(
 		back_pool(
-			count, WrapHandle((cl_mem)diff_.gpu_data(), &ctx), WrapHandle((cl_mem)diff_.mutable_gpu_data(), &ctx), sigma2_
+			count, 
+			WrapHandle((cl_mem)diff_.gpu_data(), &ctx), 
+			WrapHandle((cl_mem)diff_.mutable_gpu_data(), &ctx), 
+			sigma2_
 		), ctx.get_queue());
 	for (int i = 0; i < 2; ++i) {
 		if (propagate_down[i]) {

@@ -12,8 +12,6 @@ namespace caffe {
 #ifdef USE_GREENTEA
 const char* const proposal_kernel =
 "\n"
-"#define Dtype float\n"
-"\n"
 "static int transform_box(__global Dtype* box,\n"
 "                  const Dtype dx, const Dtype dy,\n"
 "                  const Dtype d_log_w, const Dtype d_log_h,\n"
@@ -223,9 +221,9 @@ void ProposalLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
 	{
 		std::string kernel;
 		if (is_same<Dtype, float>::value)
-			kernel = "#define DType float\n";
+			kernel = "#define Dtype float\n";
 		else if (is_same<Dtype, double>::value)
-			kernel = "#define DType double\n";
+			kernel = "#define Dtype double\n";
 		kernel += proposal_kernel;
 		ctx.add_program(kernel.c_str(), CL_KERNEL_SELECT("proposal"));
 		compiled = true;
