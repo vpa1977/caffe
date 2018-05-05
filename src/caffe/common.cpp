@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <mutex>
 #include <tuple>
 #include <vector>
 
@@ -88,13 +89,14 @@ static boost::thread_specific_ptr<Caffe> thread_instance_;
 
 // Pointer to the global instance of Caffe
 static Caffe* global_instance_;
-static std::atomic<bool> first(true);
+static std::mutex instance_mutex_;
 
 // Device contexts are initialized once and shared on all threads
 std::vector< shared_ptr<device> > Caffe::devices_;
 
 Caffe& Caffe::Get() {
-  if (first.exchange(false)) {
+  instance_mutex_.lock();
+  if (global_instance_ == nullptr) {
     // The first call must be single threaded
     // and defines the global instance
     thread_instance_.reset(new Caffe());
@@ -106,6 +108,7 @@ Caffe& Caffe::Get() {
     // or change other aspects of the Caffe object
     thread_instance_.reset(new Caffe(*global_instance_));
   }
+  instance_mutex_.unlock();
   return *(thread_instance_.get());
 }
 
@@ -254,6 +257,10 @@ void Caffe::set_random_seed(const size_t seed, device* device_context) {
   Get().random_generator_.reset(new RNG(seed));
 }
 
+void Caffe::SetDevices(std::vector<int> device_ids) {
+  NO_GPU;
+}
+
 void Caffe::SetDevice(const int device_id) {
   NO_GPU;
 }
@@ -324,6 +331,9 @@ Caffe::~Caffe() {
   // Make sure all device contexts and
   // dependent memory blocks are freed properly
   if (this == global_instance_) {
+      instance_mutex_.lock();
+      global_instance_ = NULL;
+      instance_mutex_.unlock();
       devices_.clear();
   }
 #ifdef USE_CUDA
@@ -558,6 +568,20 @@ void Caffe::SetDevice(const int device_id) {
   Get().cl_fft_state_.setup();
 #endif
 }
+
+#ifdef USE_GREENTEA
+const cl_context& Caffe::GetOpenCLContext(const int id, bool list_id) {
+  viennacl::ocl::context &ctx = viennacl::ocl::get_context(
+         GetDevice(id, list_id)->id());
+  return ctx.handle().get();
+}
+
+const cl_command_queue& Caffe::GetOpenCLQueue(const int id, bool list_id) {
+  viennacl::ocl::context &ctx = viennacl::ocl::get_context(
+         GetDevice(id, list_id)->id());
+  return ctx.get_queue().handle().get();
+}
+#endif  // USE_GREENTEA
 
 // Should call explicitly for OCL + FFT
 void Caffe::TeardownDevice(const int device_id) {
